@@ -207,7 +207,7 @@ class FREEDOM(GeneralRecommender):
         # for i in range(self.n_layers):
         #     h = torch.sparse.mm(self.mm_adj, h)
         ego_embeddings = torch.cat((self.user_embedding.weight, self.item_id_embedding.weight), dim=0)
-        all_embeddings = [ego_embeddings]
+        all_embeddings = []
         for i in range(self.n_ui_layers):
             side_embeddings = torch.sparse.mm(adj, ego_embeddings)
             ego_embeddings = side_embeddings
@@ -315,7 +315,7 @@ class FREEDOM(GeneralRecommender):
         #intra align mm embedding 
         # mm_align = self.InfoNCE_I_ALL(image_feats,text_feats,pos_items,0.1) + self.InfoNCE_I_ALL(text_feats,image_feats,pos_items,0.1)
         
-        return batch_mf_loss + 0.001 * (mf_t_loss + mf_v_loss) + 0.01 * alignment_loss
+        return batch_mf_loss + 0.01 * (mf_t_loss + mf_v_loss) + 0.01 * alignment_loss
 
     def InfoNCE(self,view1, view2, temperature: float, b_cos: bool = True):
         """
