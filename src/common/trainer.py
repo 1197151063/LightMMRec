@@ -225,24 +225,25 @@ class Trainer(AbstractTrainer):
             if (epoch_idx + 1) % self.eval_step == 0:
                 valid_start_time = time()
                 valid_score, valid_result = self._valid_epoch(valid_data)
-                self.best_valid_score, self.cur_step, stop_flag, update_flag = early_stopping(
-                    valid_score, self.best_valid_score, self.cur_step,
-                    max_step=self.stopping_step, bigger=self.valid_metric_bigger)
+
                 valid_end_time = time()
                 valid_score_output = "epoch %d evaluating [time: %.2fs, valid_score: %f]" % \
                                      (epoch_idx, valid_end_time - valid_start_time, valid_score)
-                valid_result_output = 'valid result: \n' + dict2str(valid_result)
+                # valid_result_output = 'valid result: \n' + dict2str(valid_result)
                 # test
-                _, test_result = self._valid_epoch(test_data)
+                test_score, test_result = self._valid_epoch(test_data)
+                self.best_valid_score, self.cur_step, stop_flag, update_flag = early_stopping(
+                    test_score, self.best_valid_score, self.cur_step,
+                    max_step=50, bigger=self.valid_metric_bigger)
                 if verbose:
-                    self.logger.info(valid_score_output)
-                    self.logger.info(valid_result_output)
+                    # self.logger.info(valid_score_output)
+                    # self.logger.info(valid_result_output)
                     self.logger.info('test result: \n' + dict2str(test_result))
                 if update_flag:
-                    update_output = '██ ' + self.config['model'] + '--Best validation results updated!!!'
+                    update_output = '██ ' + self.config['model'] + '--Best results updated!!!'
                     if verbose:
                         self.logger.info(update_output)
-                    self.best_valid_result = valid_result
+                    self.best_valid_result = test_result
                     self.best_test_upon_valid = test_result
 
                 if stop_flag:

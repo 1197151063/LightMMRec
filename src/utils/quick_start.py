@@ -88,11 +88,12 @@ def quick_start(model, dataset, config_dict, save_model=True):
             best_test_idx = idx
         idx += 1
 
-        logger.info('best valid result: {}'.format(dict2str(best_valid_result)))
+        # logger.info('best valid result: {}'.format(dict2str(best_valid_result)))
         logger.info('test result: {}'.format(dict2str(best_test_upon_valid)))
         logger.info('████Current BEST████:\nParameters: {}={},\n'
                     'Valid: {},\nTest: {}\n\n\n'.format(config['hyper_parameters'],
             hyper_ret[best_test_idx][0], dict2str(hyper_ret[best_test_idx][1]), dict2str(hyper_ret[best_test_idx][2])))
+        break
 
     # log info
     logger.info('\n============All Over=====================')

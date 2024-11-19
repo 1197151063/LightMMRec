@@ -48,6 +48,9 @@ class FREEDOM(GeneralRecommender):
 
         self.user_embedding = nn.Embedding(self.n_users, self.embedding_dim)
         self.item_id_embedding = nn.Embedding(self.n_items, self.embedding_dim)
+
+        self.w_t = nn.Parameter(torch.randn(1))
+        self.w_i = nn.Parameter(torch.randn(1))
         nn.init.xavier_uniform_(self.user_embedding.weight)
         nn.init.xavier_uniform_(self.item_id_embedding.weight)
 
@@ -55,11 +58,14 @@ class FREEDOM(GeneralRecommender):
         mm_adj_file = os.path.join(dataset_path, 'mm_adj_freedomdsp_{}_{}.pt'.format(self.knn_k, int(10*self.mm_image_weight)))
 
         if self.v_feat is not None:
-            self.image_embedding = nn.Embedding.from_pretrained(self.v_feat, freeze=False)
-            self.image_trs = nn.Linear(self.v_feat.shape[1], self.feat_embed_dim)
+            self.image_embedding = nn.Embedding.from_pretrained(self.v_feat, freeze=False).to(self.device)
+            self.image_trs = nn.Linear(self.v_feat.shape[1], self.feat_embed_dim,device=self.device)
         if self.t_feat is not None:
-            self.text_embedding = nn.Embedding.from_pretrained(self.t_feat, freeze=False)
-            self.text_trs = nn.Linear(self.t_feat.shape[1], self.feat_embed_dim)
+            self.text_embedding = nn.Embedding.from_pretrained(self.t_feat, freeze=False).to(self.device)
+            self.text_trs = nn.Linear(self.t_feat.shape[1], self.feat_embed_dim,device=self.device)
+        
+        # self.image_sim_norm = self.get_knn_sim(self.image_embedding.weight.detach()).cuda()
+        # self.text_sim_norm = self.get_knn_sim(self.text_embedding.weight.detach()).cuda()
 
         if os.path.exists(mm_adj_file):
             self.mm_adj = torch.load(mm_adj_file)
@@ -75,7 +81,33 @@ class FREEDOM(GeneralRecommender):
                 del text_adj
                 del image_adj
             torch.save(self.mm_adj, mm_adj_file)
+        self.image_knn_idx = self.get_knn_ind(self.image_embedding.weight.detach()).cuda()
+        self.text_knn_idx = self.get_knn_ind(self.text_embedding.weight.detach()).cuda()
+        self.image_knn_sim = self.get_knn_sim(self.image_embedding.weight.detach()).cuda()
+        self.text_knn_sim = self.get_knn_sim(self.text_embedding.weight.detach()).cuda()
 
+        # self.mm_adj = self.mm_adj.to_dense()
+        # print(self.mm_adj)
+
+    def uniformity_rescaling(self,embedding,dim):
+        limit = torch.sqrt(torch.tensor(6.0 / (dim + dim))) 
+        xavier_range = (-limit.item(), limit.item())
+        min_val, max_val = xavier_range
+        scaled_features = (embedding - embedding.min()) / (embedding.max() - embedding.min())
+        scaled_features = scaled_features * (max_val - min_val) + min_val
+        return scaled_features
+    
+    def get_knn_sim(self,mm_embeddings):
+        context_norm = mm_embeddings.div(torch.norm(mm_embeddings, p=2, dim=-1, keepdim=True))
+        sim = torch.mm(context_norm, context_norm.transpose(1, 0))
+        return sim
+    
+    def get_knn_ind(self,mm_embeddings):
+        context_norm = mm_embeddings.div(torch.norm(mm_embeddings, p=2, dim=-1, keepdim=True))
+        sim = torch.mm(context_norm, context_norm.transpose(1, 0))
+        _, knn_ind = torch.topk(sim, self.knn_k, dim=-1,sorted=False)
+        return knn_ind
+    
     def get_knn_adj_mat(self, mm_embeddings):
         context_norm = mm_embeddings.div(torch.norm(mm_embeddings, p=2, dim=-1, keepdim=True))
         sim = torch.mm(context_norm, context_norm.transpose(1, 0))
@@ -161,11 +193,19 @@ class FREEDOM(GeneralRecommender):
         values = self._normalize_adj_m(edges, torch.Size((self.n_users, self.n_items)))
         return edges, values
 
-    def forward(self, adj):
-        h = self.item_id_embedding.weight
-        for i in range(self.n_layers):
-            h = torch.sparse.mm(self.mm_adj, h)
 
+    def item_alignment(self,items,knn_ind,knn_sim):
+        knn_neighbour = knn_ind[items] # [num_items_batch * knn_k]
+        user_emb = self.item_id_embedding.weight[items].unsqueeze(1)
+        item_emb = self.item_id_embedding.weight[knn_neighbour]
+        sim_score = knn_sim[items][:,knn_neighbour]
+        loss = -sim_score * (user_emb * item_emb).sum(dim=-1).sigmoid().log()
+        return loss.sum()
+
+    def forward(self, adj):
+        # h = self.item_id_embedding.weight
+        # for i in range(self.n_layers):
+        #     h = torch.sparse.mm(self.mm_adj, h)
         ego_embeddings = torch.cat((self.user_embedding.weight, self.item_id_embedding.weight), dim=0)
         all_embeddings = [ego_embeddings]
         for i in range(self.n_ui_layers):
@@ -175,8 +215,8 @@ class FREEDOM(GeneralRecommender):
         all_embeddings = torch.stack(all_embeddings, dim=1)
         all_embeddings = all_embeddings.mean(dim=1, keepdim=False)
         u_g_embeddings, i_g_embeddings = torch.split(all_embeddings, [self.n_users, self.n_items], dim=0)
-        return u_g_embeddings, i_g_embeddings + h
-
+        return u_g_embeddings, i_g_embeddings 
+    
     def bpr_loss(self, users, pos_items, neg_items):
         pos_scores = torch.sum(torch.mul(users, pos_items), dim=1)
         neg_scores = torch.sum(torch.mul(users, neg_items), dim=1)
@@ -186,12 +226,73 @@ class FREEDOM(GeneralRecommender):
 
         return mf_loss
 
+    def au_loss(self,users,items):
+        alignment = self.alignment(users,items)
+        u_uniformity = self.uniformity(users)
+        i_uniformity = self.uniformity(items)
+        return alignment +  0.1* (u_uniformity + i_uniformity)
+    
+    def InfoNCE_I_ALL(self,view1,view2,pos,t):
+        view1 = F.normalize(view1,dim=1)
+        view2 = F.normalize(view2,dim=1)
+        view1_pos = view1[pos]
+        view2_pos = view2[pos]
+        info_pos = (view1_pos * view2_pos).sum(dim=1)/ t
+        info_pos_score = torch.exp(info_pos)
+        info_neg = (view1_pos @ view2.t())/ t
+        info_neg = torch.exp(info_neg)
+        info_neg = torch.sum(info_neg,dim=1,keepdim=True)
+        info_neg = info_neg.T
+        ssl_logits = -torch.log(info_pos_score / info_neg).mean()
+        return ssl_logits
+    
+    def InfoNCE_U_ALL(self,view1,view2,u_idx,pos,t):
+        view1 = F.normalize(view1,dim=1)
+        view2 = F.normalize(view2,dim=1)
+        view1_pos = view1[u_idx]
+        view2_pos = view2[pos]
+        info_pos = (view1_pos * view2_pos).sum(dim=1)/ t
+        info_pos_score = torch.exp(info_pos)
+        info_neg = (view1_pos @ view2.t())/ t
+        info_neg = torch.exp(info_neg)
+        info_neg = torch.sum(info_neg,dim=1,keepdim=True)
+        info_neg = info_neg.T
+        ssl_logits = -torch.log(info_pos_score / info_neg).mean()
+        return ssl_logits
+
+    def multimodal_contrastive_loss(self,view1,view2,pos_indices,temperature=0.2):
+        anchor_embeddings = view1[pos_indices]
+        pos_embeddings = view2[pos_indices]
+        neg_embeddings = view2
+        pos_similarity = F.cosine_similarity(anchor_embeddings, pos_embeddings)
+        anchor_embeddings = anchor_embeddings.unsqueeze(1)  # (batch_size, 1, embedding_dim)
+        neg_similarity = F.cosine_similarity(anchor_embeddings, neg_embeddings, dim=2)
+        exp_pos = torch.exp(pos_similarity / temperature)  # (batch_size,)
+        exp_neg = torch.exp(neg_similarity / temperature).sum(dim=1)  # (batch_size,)
+        loss = -torch.log(exp_pos / (exp_pos + exp_neg)).mean()
+        return loss
+    
+    
+    def align_loss(self,item_embeddings, image_embeddings, text_embeddings, alpha=0.5):
+        image_loss = F.mse_loss(item_embeddings, image_embeddings)
+        text_loss = F.mse_loss(item_embeddings, text_embeddings)
+        loss = alpha * image_loss + (1 - alpha) * text_loss
+        return loss
+    
+    def center_alignment(self,x,y):
+        x, y = F.normalize(x, dim=-1), F.normalize(y, dim=-1)
+        x = x.mean(dim=0)
+        y = y.mean(dim=0)
+        return (x - y).pow(2).mean()
+
+
     def calculate_loss(self, interaction):
         users = interaction[0]
         pos_items = interaction[1]
         neg_items = interaction[2]
-
-        ua_embeddings, ia_embeddings = self.forward(self.masked_adj)
+        text_feats = self.text_trs(self.text_embedding.weight)
+        image_feats = self.image_trs(self.image_embedding.weight)     
+        ua_embeddings, ia_embeddings = self.forward(self.norm_adj)
         self.build_item_graph = False
 
         u_g_embeddings = ua_embeddings[users]
@@ -199,16 +300,45 @@ class FREEDOM(GeneralRecommender):
         neg_i_g_embeddings = ia_embeddings[neg_items]
 
         batch_mf_loss = self.bpr_loss(u_g_embeddings, pos_i_g_embeddings,
-                                                                      neg_i_g_embeddings)
-        mf_v_loss, mf_t_loss = 0.0, 0.0
-        if self.t_feat is not None:
-            text_feats = self.text_trs(self.text_embedding.weight)
-            mf_t_loss = self.bpr_loss(ua_embeddings[users], text_feats[pos_items], text_feats[neg_items])
-        if self.v_feat is not None:
-            image_feats = self.image_trs(self.image_embedding.weight)
-            mf_v_loss = self.bpr_loss(ua_embeddings[users], image_feats[pos_items], image_feats[neg_items])
-        return batch_mf_loss + self.reg_weight * (mf_t_loss + mf_v_loss)
+                                                neg_i_g_embeddings)
+        #align user embedding with mm embedding works
+        mf_v_loss = self.InfoNCE_U_ALL(ua_embeddings,image_feats,users,pos_items,0.1)
+        mf_t_loss = self.InfoNCE_U_ALL(ua_embeddings,text_feats,users,pos_items,0.1)
+        v_alignment = self.item_alignment(pos_items,self.image_knn_idx,self.image_knn_sim)
+        t_alignment = self.item_alignment(pos_items,self.text_knn_idx,self.text_knn_sim)
+        alignment_loss = 0.1 * v_alignment + 0.9 * t_alignment
+        # v_i_align = self.alignment(pos_i_g_embeddings,image_feats[pos_items])
+        # t_i_align = self.alignment(pos_i_g_embeddings,text_feats[pos_items])
+        # lambda_align = 0.3
+        # v_i_align = self.structured_awared_alignment(ia_embeddings,pos_items,'v')
+        # t_i_align = self.structured_awared_alignment(ia_embeddings,pos_items,'t')
+        #intra align mm embedding 
+        # mm_align = self.InfoNCE_I_ALL(image_feats,text_feats,pos_items,0.1) + self.InfoNCE_I_ALL(text_feats,image_feats,pos_items,0.1)
+        
+        return batch_mf_loss + 0.001 * (mf_t_loss + mf_v_loss) + 0.01 * alignment_loss
 
+    def InfoNCE(self,view1, view2, temperature: float, b_cos: bool = True):
+        """
+        Args:
+            view1: (torch.Tensor - N x D)
+            view2: (torch.Tensor - N x D)
+            temperature: float
+            b_cos (bool)
+
+        Return: Average InfoNCE Loss
+        """
+        if b_cos:
+            view1, view2 = F.normalize(view1, dim=1), F.normalize(view2, dim=1)
+
+        pos_score = (view1 @ view2.T) / temperature
+        score = torch.diag(F.log_softmax(pos_score, dim=1))
+        return -score.mean()
+    
+    def cosine_similarity_loss(self,embedding1, embedding2):
+        cos_sim = F.cosine_similarity(embedding1, embedding2)
+        loss = 1 - torch.mean(cos_sim) 
+        return loss
+    
     def full_sort_predict(self, interaction):
         user = interaction[0]
 
@@ -219,3 +349,28 @@ class FREEDOM(GeneralRecommender):
         scores = torch.matmul(u_embeddings, restore_item_e.transpose(0, 1))
         return scores
 
+    def alignment(self,x, y):
+        x, y = F.normalize(x, dim=-1), F.normalize(y, dim=-1)
+        return (x - y).norm(p=2, dim=1).pow(2).mean()
+
+    def alignment_loss(self,edge_label_index):
+        x_u,x_i = self.forward(self.norm_adj)
+        batch_x_u,batch_x_i = x_u[edge_label_index[0]],x_i[edge_label_index[1]]
+        return self.alignment(batch_x_u,batch_x_i)
+    
+    def uniformity_loss(self,edge_label_index):
+        x_u,x_i = self.forward(self.norm_adj)
+        batch_x_u,batch_x_i = x_u[edge_label_index[0]],x_i[edge_label_index[1]]
+        return  (self.uniformity(batch_x_u) + self.uniformity(batch_x_i))
+
+    def uniformity(self,x, t=2):
+        x = F.normalize(x, dim=-1)
+        return torch.pdist(x, p=2).pow(2).mul(-t).exp().mean().log()
+    
+    def L2_regloss(self,user_emb,item_emb,users,pos,neg):
+        u_idx = torch.unique(users)
+        i_idx = torch.unique(torch.cat([pos,neg]))
+        u_emb = user_emb[u_idx]
+        i_emb = item_emb[i_idx]
+        return  (1/2)*(u_emb.norm(2).pow(2) + i_emb.norm(2).pow(2))/ u_idx.size(0)
+    
