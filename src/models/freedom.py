@@ -49,11 +49,10 @@ class FREEDOM(GeneralRecommender):
         self.user_embedding = nn.Embedding(self.n_users, self.embedding_dim)
         self.item_id_embedding = nn.Embedding(self.n_items, self.embedding_dim)
 
-        self.w_t = nn.Parameter(torch.randn(1))
-        self.w_i = nn.Parameter(torch.randn(1))
-        nn.init.xavier_uniform_(self.user_embedding.weight)
-        nn.init.xavier_uniform_(self.item_id_embedding.weight)
-
+        nn.init.xavier_uniform_(self.user_embedding.weight,2)
+        nn.init.xavier_uniform_(self.item_id_embedding.weight,2)
+        # nn.init.xavier_normal_(self.user_embedding.weight,5)
+        # nn.init.xavier_normal_(self.item_id_embedding.weight,5)
         dataset_path = os.path.abspath(config['data_path'] + config['dataset'])
         mm_adj_file = os.path.join(dataset_path, 'mm_adj_freedomdsp_{}_{}.pt'.format(self.knn_k, int(10*self.mm_image_weight)))
 
@@ -67,20 +66,20 @@ class FREEDOM(GeneralRecommender):
         # self.image_sim_norm = self.get_knn_sim(self.image_embedding.weight.detach()).cuda()
         # self.text_sim_norm = self.get_knn_sim(self.text_embedding.weight.detach()).cuda()
 
-        if os.path.exists(mm_adj_file):
-            self.mm_adj = torch.load(mm_adj_file)
-        else:
-            if self.v_feat is not None:
-                indices, image_adj = self.get_knn_adj_mat(self.image_embedding.weight.detach())
-                self.mm_adj = image_adj
-            if self.t_feat is not None:
-                indices, text_adj = self.get_knn_adj_mat(self.text_embedding.weight.detach())
-                self.mm_adj = text_adj
-            if self.v_feat is not None and self.t_feat is not None:
-                self.mm_adj = self.mm_image_weight * image_adj + (1.0 - self.mm_image_weight) * text_adj
-                del text_adj
-                del image_adj
-            torch.save(self.mm_adj, mm_adj_file)
+        # if os.path.exists(mm_adj_file):
+        #     self.mm_adj = torch.load(mm_adj_file)
+        # else:
+        #     if self.v_feat is not None:
+        #         indices, image_adj = self.get_knn_adj_mat(self.image_embedding.weight.detach())
+        #         self.mm_adj = image_adj
+        #     if self.t_feat is not None:
+        #         indices, text_adj = self.get_knn_adj_mat(self.text_embedding.weight.detach())
+        #         self.mm_adj = text_adj
+        #     if self.v_feat is not None and self.t_feat is not None:
+        #         self.mm_adj = self.mm_image_weight * image_adj + (1.0 - self.mm_image_weight) * text_adj
+        #         del text_adj
+        #         del image_adj
+        #     torch.save(self.mm_adj, mm_adj_file)
         self.image_knn_idx = self.get_knn_ind(self.image_embedding.weight.detach()).cuda()
         self.text_knn_idx = self.get_knn_ind(self.text_embedding.weight.detach()).cuda()
         self.image_knn_sim = self.get_knn_sim(self.image_embedding.weight.detach()).cuda()
@@ -105,7 +104,7 @@ class FREEDOM(GeneralRecommender):
     def get_knn_ind(self,mm_embeddings):
         context_norm = mm_embeddings.div(torch.norm(mm_embeddings, p=2, dim=-1, keepdim=True))
         sim = torch.mm(context_norm, context_norm.transpose(1, 0))
-        _, knn_ind = torch.topk(sim, self.knn_k, dim=-1,sorted=False)
+        _, knn_ind = torch.topk(sim, 20 , dim=-1,sorted=False)
         return knn_ind
     
     def get_knn_adj_mat(self, mm_embeddings):
@@ -207,7 +206,7 @@ class FREEDOM(GeneralRecommender):
         # for i in range(self.n_layers):
         #     h = torch.sparse.mm(self.mm_adj, h)
         ego_embeddings = torch.cat((self.user_embedding.weight, self.item_id_embedding.weight), dim=0)
-        all_embeddings = []
+        all_embeddings = [ego_embeddings]
         for i in range(self.n_ui_layers):
             side_embeddings = torch.sparse.mm(adj, ego_embeddings)
             ego_embeddings = side_embeddings
@@ -259,7 +258,42 @@ class FREEDOM(GeneralRecommender):
         info_neg = info_neg.T
         ssl_logits = -torch.log(info_pos_score / info_neg).mean()
         return ssl_logits
+    
+    def InfoNCE_U_BATCH(self,view1,view2,u_idx,pos,neg,t):
+        view1 = F.normalize(view1,dim=1)
+        view2 = F.normalize(view2,dim=1)
+        view1_pos = view1[u_idx]
+        view2_pos = view2[pos]
+        view2_neg = view2[neg]
+        info_pos = (view1_pos * view2_pos).sum(dim=1)/ t
+        info_pos_score = torch.exp(info_pos)
+        info_neg = (view1_pos @ view2_neg.t())/ t
+        info_neg = torch.exp(info_neg)
+        info_neg = torch.sum(info_neg,dim=1,keepdim=True)
+        info_neg = info_neg.T
+        ssl_logits = -torch.log(info_pos_score / info_neg).mean()
+        return ssl_logits
+    
+    def norm_loss(self):
+        loss = 0.0
+        for parameter in self.parameters():
+            loss += torch.sum(parameter ** 2)
+        return loss / 2
 
+    def InfoNCE_UI(self,users,items,u_idx,i_idx,t):
+        view1 = F.normalize(users,dim=1)
+        view2 = F.normalize(items,dim=1)
+        view1_pos = view1[u_idx]
+        view2_pos = view2[i_idx]
+        info_pos = (view1_pos * view2_pos).sum(dim=1)/ t
+        info_pos_score = torch.exp(info_pos)
+        info_neg = (view1_pos @ view2.t())/ t
+        info_neg = torch.exp(info_neg)
+        info_neg = torch.sum(info_neg,dim=1,keepdim=True)
+        info_neg = info_neg.T
+        ssl_logits = -torch.log(info_pos_score / info_neg).mean()
+        return ssl_logits
+    
     def multimodal_contrastive_loss(self,view1,view2,pos_indices,temperature=0.2):
         anchor_embeddings = view1[pos_indices]
         pos_embeddings = view2[pos_indices]
@@ -298,12 +332,15 @@ class FREEDOM(GeneralRecommender):
         u_g_embeddings = ua_embeddings[users]
         pos_i_g_embeddings = ia_embeddings[pos_items]
         neg_i_g_embeddings = ia_embeddings[neg_items]
-
         batch_mf_loss = self.bpr_loss(u_g_embeddings, pos_i_g_embeddings,
                                                 neg_i_g_embeddings)
+        # batch_mf_loss = self.au_loss(u_g_embeddings, pos_i_g_embeddings)
+        # batch_mf_loss = self.InfoNCE_UI(ua_embeddings,ia_embeddings,users,pos_items,0.2)
         #align user embedding with mm embedding works
-        mf_v_loss = self.InfoNCE_U_ALL(ua_embeddings,image_feats,users,pos_items,0.1)
-        mf_t_loss = self.InfoNCE_U_ALL(ua_embeddings,text_feats,users,pos_items,0.1)
+        # mf_v_loss = self.InfoNCE_U_ALL(ua_embeddings,image_feats,users,pos_items,0.1)
+        # mf_t_loss = self.InfoNCE_U_ALL(ua_embeddings,text_feats,users,pos_items,0.1)
+        mf_v_loss = self.InfoNCE_U_BATCH(ua_embeddings,image_feats,users,pos_items,neg_items,0.1)
+        mf_t_loss = self.InfoNCE_U_BATCH(ua_embeddings,text_feats,users,pos_items,neg_items,0.1)
         v_alignment = self.item_alignment(pos_items,self.image_knn_idx,self.image_knn_sim)
         t_alignment = self.item_alignment(pos_items,self.text_knn_idx,self.text_knn_sim)
         alignment_loss = 0.1 * v_alignment + 0.9 * t_alignment
@@ -314,8 +351,8 @@ class FREEDOM(GeneralRecommender):
         # t_i_align = self.structured_awared_alignment(ia_embeddings,pos_items,'t')
         #intra align mm embedding 
         # mm_align = self.InfoNCE_I_ALL(image_feats,text_feats,pos_items,0.1) + self.InfoNCE_I_ALL(text_feats,image_feats,pos_items,0.1)
-        
-        return batch_mf_loss + 0.01 * (mf_t_loss + mf_v_loss) + 0.01 * alignment_loss
+        # norm_loss = self.norm_loss() * 1e-4
+        return batch_mf_loss + 0.01 * (mf_t_loss + mf_v_loss) + 5e-4* alignment_loss
 
     def InfoNCE(self,view1, view2, temperature: float, b_cos: bool = True):
         """

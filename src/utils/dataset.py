@@ -54,26 +54,6 @@ class RecDataset(object):
         if not self.df.columns.isin(cols).all():
             raise ValueError('File {} lost some required columns.'.format(inter_file))
 
-    def split(self):
-        dfs = []
-        # splitting into training/validation/test
-        for i in range(3):
-            temp_df = self.df[self.df[self.splitting_label] == i].copy()
-            temp_df.drop(self.splitting_label, inplace=True, axis=1)        # no use again
-            dfs.append(temp_df)
-        
-        dfs[0] = pd.concat([dfs[0], dfs[1]], ignore_index=True)
-
-        if self.config['filter_out_cod_start_users']:
-            train_u = set(dfs[0][self.uid_field].values)
-            i = 2
-            dropped_inter = pd.Series(True, index=dfs[i].index)
-            dropped_inter ^= dfs[i][self.uid_field].isin(train_u)
-            dfs[i].drop(dfs[i].index[dropped_inter], inplace=True)
-
-        # wrap as RecDataset
-        full_ds = [self.copy(_) for _ in dfs]
-        return full_ds
     # def split(self):
     #     dfs = []
     #     # splitting into training/validation/test
@@ -81,17 +61,37 @@ class RecDataset(object):
     #         temp_df = self.df[self.df[self.splitting_label] == i].copy()
     #         temp_df.drop(self.splitting_label, inplace=True, axis=1)        # no use again
     #         dfs.append(temp_df)
+        
+    #     dfs[0] = pd.concat([dfs[0], dfs[1]], ignore_index=True)
+
     #     if self.config['filter_out_cod_start_users']:
-    #         # filtering out new users in val/test sets
     #         train_u = set(dfs[0][self.uid_field].values)
-    #         for i in [1, 2]:
-    #             dropped_inter = pd.Series(True, index=dfs[i].index)
-    #             dropped_inter ^= dfs[i][self.uid_field].isin(train_u)
-    #             dfs[i].drop(dfs[i].index[dropped_inter], inplace=True)
+    #         i = 2
+    #         dropped_inter = pd.Series(True, index=dfs[i].index)
+    #         dropped_inter ^= dfs[i][self.uid_field].isin(train_u)
+    #         dfs[i].drop(dfs[i].index[dropped_inter], inplace=True)
 
     #     # wrap as RecDataset
     #     full_ds = [self.copy(_) for _ in dfs]
     #     return full_ds
+    def split(self):
+        dfs = []
+        # splitting into training/validation/test
+        for i in range(3):
+            temp_df = self.df[self.df[self.splitting_label] == i].copy()
+            temp_df.drop(self.splitting_label, inplace=True, axis=1)        # no use again
+            dfs.append(temp_df)
+        if self.config['filter_out_cod_start_users']:
+            # filtering out new users in val/test sets
+            train_u = set(dfs[0][self.uid_field].values)
+            for i in [1, 2]:
+                dropped_inter = pd.Series(True, index=dfs[i].index)
+                dropped_inter ^= dfs[i][self.uid_field].isin(train_u)
+                dfs[i].drop(dfs[i].index[dropped_inter], inplace=True)
+
+        # wrap as RecDataset
+        full_ds = [self.copy(_) for _ in dfs]
+        return full_ds
     def copy(self, new_df):
         """Given a new interaction feature, return a new :class:`Dataset` object,
                 whose interaction feature is updated with ``new_df``, and all the other attributes the same.

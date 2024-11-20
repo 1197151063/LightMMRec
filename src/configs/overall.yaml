@@ -19,7 +19,7 @@ embedding_size: 64
 # training settings
 epochs: 1000
 stopping_step: 30
-train_batch_size: 1024
+train_batch_size: 2048
 learner: adam
 learning_rate: 0.001
 learning_rate_scheduler: [1.0, 50]
@@ -40,7 +40,7 @@ field_separator: "\t"
 metrics: ["Recall", "NDCG"]
 topk: [10, 20]
 valid_metric: Recall@20
-eval_batch_size: 4096
+eval_batch_size: 1024
 
 #
 use_raw_features: False
